@@ -1,12 +1,47 @@
 import { toCanvas } from "html-to-image";
 import type { HtmlImageEmbedResult, NoteHtmlExportMeta } from "@/lib/note-html-export";
+import { prepareNoteBodyHtmlForExport } from "@/lib/note-html-export";
 import {
-  buildNoteHtmlContentMarkup,
-  prepareNoteBodyHtmlForExport,
-} from "@/lib/note-html-export";
+  type NoteImageFormat,
+  type NoteImageTheme,
+  type NoteImageBackground,
+  type NoteImageFontStyle,
+  type NoteImageFontSize,
+  type NoteImageCardWidth,
+  type ThemeStyleConfig,
+  NOTE_IMAGE_EXPORT_WIDTH,
+  NOTE_IMAGE_EXPORT_PIXEL_RATIO,
+  NOTE_IMAGE_CARD_WIDTH_PIXELS,
+  NOTE_IMAGE_BACKGROUND_COLORS,
+  NOTE_IMAGE_THEMES,
+  NOTE_IMAGE_FONT_FAMILIES,
+  NOTE_IMAGE_FONT_SIZES,
+  resolveTheme,
+  buildImageExportBasename,
+  buildNoteImageCardMarkup,
+  generateCardCss,
+} from "@edgeever/shared/note-image-card";
 
-export type NoteImageFormat = "jpeg" | "png";
-export type NoteImageBackground = "mint" | "slate" | "warm";
+export {
+  type NoteImageFormat,
+  type NoteImageTheme,
+  type NoteImageBackground,
+  type NoteImageFontStyle,
+  type NoteImageFontSize,
+  type NoteImageCardWidth,
+  type ThemeStyleConfig,
+  NOTE_IMAGE_EXPORT_WIDTH,
+  NOTE_IMAGE_EXPORT_PIXEL_RATIO,
+  NOTE_IMAGE_CARD_WIDTH_PIXELS,
+  NOTE_IMAGE_BACKGROUND_COLORS,
+  NOTE_IMAGE_THEMES,
+  NOTE_IMAGE_FONT_FAMILIES,
+  NOTE_IMAGE_FONT_SIZES,
+  resolveTheme,
+  buildImageExportBasename,
+  buildNoteImageCardMarkup,
+  generateCardCss,
+};
 
 export type DownloadNoteImageOptions = NoteHtmlExportMeta & {
   bodyHtml: string;
@@ -14,6 +49,14 @@ export type DownloadNoteImageOptions = NoteHtmlExportMeta & {
   fallbackTitle: string;
   format: NoteImageFormat;
   background?: NoteImageBackground;
+  theme?: NoteImageTheme;
+  fontStyle?: NoteImageFontStyle;
+  fontSize?: NoteImageFontSize;
+  cardWidth?: NoteImageCardWidth;
+  showTitle?: boolean;
+  showNotebook?: boolean;
+  showTags?: boolean;
+  showUpdatedAt?: boolean;
   styles: string;
 };
 
@@ -26,43 +69,12 @@ export type PreparedNoteImage = {
   width: number;
 };
 
-export const NOTE_IMAGE_EXPORT_WIDTH = 768;
-export const NOTE_IMAGE_EXPORT_PIXEL_RATIO = 1.5;
-
-const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
-const NOTE_IMAGE_BACKGROUND_COLORS: Record<NoteImageBackground, string> = {
-  mint: "#ecfdf5",
-  slate: "#f8fafc",
-  warm: "#fffbeb",
-};
-const NOTE_IMAGE_SHARE_STYLES = `
-  .edgeever-image-share { padding: 40px 28px 32px; }
-  .edgeever-image-share .edgeever-html-document { border-radius: 16px; padding: 40px 36px 32px; }
-  .edgeever-image-share .edgeever-html-title { margin-bottom: 14px; font-size: 36px; letter-spacing: -0.02em; line-height: 1.24; }
-  .edgeever-image-share .edgeever-html-meta { margin-bottom: 28px; padding-bottom: 18px; }
-  .edgeever-image-share .edgeever-html-content { font-size: 17px; line-height: 1.82; }
-  .edgeever-image-share .edgeever-image-brand { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 40px; border-top: 1px solid #e2e8f0; padding-top: 20px; color: #64748b; font-size: 13px; font-weight: 650; letter-spacing: 0.01em; }
-  .edgeever-image-share .edgeever-image-brand-mark { width: 9px; height: 9px; border-radius: 3px; background: #16a06e; }
-  .edgeever-image-share .edgeever-image-brand-name { color: #07130b; font-weight: 760; }
-`;
-
-export const buildImageExportBasename = (title: string, fallback: string) => {
-  const sanitized = title
-    .replace(/[\u0000-\u001f<>:"/\\|?*]/g, "-")
-    .replace(/\s+/g, " ")
-    .replace(/[. ]+$/g, "")
-    .trim()
-    .slice(0, 100);
-  const basename = sanitized || fallback;
-  return WINDOWS_RESERVED_NAME.test(basename) ? `_${basename}` : basename;
-};
-
 const canvasToImageBlob = (canvas: HTMLCanvasElement, format: NoteImageFormat) =>
   new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
-      (blob) => blob ? resolve(blob) : reject(new Error("Image renderer returned an empty file")),
+      (blob) => (blob ? resolve(blob) : reject(new Error("Image renderer returned an empty file"))),
       format === "jpeg" ? "image/jpeg" : "image/png",
-      format === "jpeg" ? 0.9 : 1,
+      format === "jpeg" ? 0.92 : 1,
     );
   });
 
@@ -79,17 +91,19 @@ export const downloadPreparedNoteImage = ({ blob, filename }: Pick<PreparedNoteI
 };
 
 const waitForImages = async (root: HTMLElement) => {
-  await Promise.all(Array.from(root.querySelectorAll("img")).map(async (image) => {
-    if (image.complete) return;
-    try {
-      await image.decode();
-    } catch {
-      // The HTML preparation stage reports resources that could not be embedded.
-    }
-  }));
+  await Promise.all(
+    Array.from(root.querySelectorAll("img")).map(async (image) => {
+      if (image.complete) return;
+      try {
+        await image.decode();
+      } catch {
+        // The HTML preparation stage reports resources that could not be embedded.
+      }
+    }),
+  );
 };
 
-const renderImage = async (source: HTMLElement, format: NoteImageFormat, backgroundColor: string) => {
+const renderImage = async (source: HTMLElement, format: NoteImageFormat, backgroundColor: string, targetWidth: number) => {
   await document.fonts?.ready;
   await waitForImages(source);
   const totalHeight = Math.max(1, Math.ceil(source.getBoundingClientRect().height));
@@ -99,61 +113,81 @@ const renderImage = async (source: HTMLElement, format: NoteImageFormat, backgro
     height: totalHeight,
     pixelRatio: NOTE_IMAGE_EXPORT_PIXEL_RATIO,
     skipFonts: true,
-    width: NOTE_IMAGE_EXPORT_WIDTH,
+    width: targetWidth,
   });
   return { blob: await canvasToImageBlob(canvas, format), height: canvas.height, width: canvas.width };
 };
 
 export const createNoteImage = async ({
   bodyHtml,
-  branding = false,
+  branding = true,
   title,
   notebook,
   tags,
   updatedAt,
   fallbackTitle,
   format,
-  background = "slate",
+  background,
+  theme,
+  fontStyle = "serif",
+  fontSize = "lg",
+  cardWidth = "standard",
+  showTitle = true,
+  showNotebook = false,
+  showTags = false,
+  showUpdatedAt = true,
   styles,
 }: DownloadNoteImageOptions): Promise<PreparedNoteImage> => {
+  const resolvedTheme = resolveTheme(background, theme);
+  const targetWidth = NOTE_IMAGE_CARD_WIDTH_PIXELS[cardWidth] || 680;
+  const themeCfg = NOTE_IMAGE_THEMES[resolvedTheme];
+
   const prepared = await prepareNoteBodyHtmlForExport(bodyHtml);
   const host = document.createElement("div");
   host.style.cssText = [
     "position:fixed",
     "left:-100000px",
     "top:0",
-    `width:${NOTE_IMAGE_EXPORT_WIDTH}px`,
+    `width:${targetWidth}px`,
     "pointer-events:none",
   ].join(";");
+
   const style = document.createElement("style");
-  style.textContent = `${styles}\n${NOTE_IMAGE_SHARE_STYLES}`;
+  style.textContent = `${styles}\n${generateCardCss({ theme: resolvedTheme, fontStyle, fontSize, cardWidth })}`;
   host.appendChild(style);
-  host.insertAdjacentHTML("beforeend", buildNoteHtmlContentMarkup({
-    title,
-    notebook,
-    tags,
-    updatedAt,
-    bodyHtml: prepared.bodyHtml,
-  }));
+
+  host.insertAdjacentHTML(
+    "beforeend",
+    buildNoteImageCardMarkup({
+      title,
+      notebook,
+      tags,
+      updatedAt,
+      bodyHtml: prepared.bodyHtml,
+      theme: resolvedTheme,
+      fontStyle,
+      showTitle,
+      showNotebook,
+      showTags,
+      showUpdatedAt,
+      showBranding: branding,
+    }),
+  );
+
   const source = host.lastElementChild as HTMLElement;
-  source.classList.add("edgeever-image-share");
-  if (branding) {
-    const footer = document.createElement("footer");
-    footer.className = "edgeever-image-brand";
-    footer.innerHTML = '<span class="edgeever-image-brand-mark"></span><span>Made with <span class="edgeever-image-brand-name">EdgeEver</span></span>';
-    source.querySelector(".edgeever-html-document")?.appendChild(footer);
-  }
-  source.style.width = `${NOTE_IMAGE_EXPORT_WIDTH}px`;
+  source.style.width = `${targetWidth}px`;
   source.style.maxWidth = "none";
   source.style.margin = "0";
-  source.style.backgroundColor = NOTE_IMAGE_BACKGROUND_COLORS[background];
+
   document.body.appendChild(host);
 
   try {
-    const image = await renderImage(source, format, NOTE_IMAGE_BACKGROUND_COLORS[background]);
+    const canvasBgColor = NOTE_IMAGE_BACKGROUND_COLORS[resolvedTheme] || themeCfg.canvasBg;
+    const image = await renderImage(source, format, canvasBgColor, targetWidth);
     const basename = buildImageExportBasename(title, fallbackTitle);
     const extension = format === "jpeg" ? "jpg" : "png";
     const filename = `${basename}.${extension}`;
+
     return {
       blob: image.blob,
       filename,
